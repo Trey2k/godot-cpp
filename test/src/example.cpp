@@ -138,7 +138,20 @@ void Example::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("test_node_argument"), &Example::test_node_argument);
 	ClassDB::bind_method(D_METHOD("test_string_ops"), &Example::test_string_ops);
 	ClassDB::bind_method(D_METHOD("test_str_utility"), &Example::test_str_utility);
+	ClassDB::bind_method(D_METHOD("test_string_is_fourty_two"), &Example::test_string_is_fourty_two);
+	ClassDB::bind_method(D_METHOD("test_string_resize"), &Example::test_string_resize);
 	ClassDB::bind_method(D_METHOD("test_vector_ops"), &Example::test_vector_ops);
+
+	ClassDB::bind_method(D_METHOD("test_object_cast_to_node", "object"), &Example::test_object_cast_to_node);
+	ClassDB::bind_method(D_METHOD("test_object_cast_to_control", "object"), &Example::test_object_cast_to_control);
+	ClassDB::bind_method(D_METHOD("test_object_cast_to_example", "object"), &Example::test_object_cast_to_example);
+
+	ClassDB::bind_method(D_METHOD("test_variant_vector2i_conversion", "variant"), &Example::test_variant_vector2i_conversion);
+	ClassDB::bind_method(D_METHOD("test_variant_int_conversion", "variant"), &Example::test_variant_int_conversion);
+	ClassDB::bind_method(D_METHOD("test_variant_float_conversion", "variant"), &Example::test_variant_float_conversion);
+
+	ClassDB::bind_method(D_METHOD("test_add_child", "node"), &Example::test_add_child);
+	ClassDB::bind_method(D_METHOD("test_set_tileset", "tilemap", "tileset"), &Example::test_set_tileset);
 
 	ClassDB::bind_method(D_METHOD("test_bitfield", "flags"), &Example::test_bitfield);
 
@@ -299,6 +312,20 @@ String Example::test_str_utility() const {
 	return UtilityFunctions::str("Hello, ", "World", "! The answer is ", 42);
 }
 
+bool Example::test_string_is_fourty_two(const String &p_string) const {
+	return strcmp(p_string.utf8().ptr(), "fourty two") == 0;
+}
+
+String Example::test_string_resize(String p_string) const {
+	int orig_len = p_string.length();
+	p_string.resize(orig_len + 3);
+	char32_t *data = p_string.ptrw();
+	data[orig_len + 0] = '!';
+	data[orig_len + 1] = '?';
+	data[orig_len + 2] = '\0';
+	return p_string;
+}
+
 int Example::test_vector_ops() const {
 	PackedInt32Array arr;
 	arr.push_back(10);
@@ -341,6 +368,38 @@ Dictionary Example::test_dictionary() const {
 
 Example *Example::test_node_argument(Example *p_node) const {
 	return p_node;
+}
+
+bool Example::test_object_cast_to_node(Object *p_object) const {
+	return Object::cast_to<Node>(p_object) != nullptr;
+}
+
+bool Example::test_object_cast_to_control(Object *p_object) const {
+	return Object::cast_to<Control>(p_object) != nullptr;
+}
+
+bool Example::test_object_cast_to_example(Object *p_object) const {
+	return Object::cast_to<Example>(p_object) != nullptr;
+}
+
+Vector2i Example::test_variant_vector2i_conversion(const Variant &p_variant) const {
+	return p_variant;
+}
+
+int Example::test_variant_int_conversion(const Variant &p_variant) const {
+	return p_variant;
+}
+
+float Example::test_variant_float_conversion(const Variant &p_variant) const {
+	return p_variant;
+}
+
+void Example::test_add_child(Node *p_node) {
+	add_child(p_node);
+}
+
+void Example::test_set_tileset(TileMap *p_tilemap, const Ref<TileSet> &p_tileset) const {
+	p_tilemap->set_tileset(p_tileset);
 }
 
 BitField<Example::Flags> Example::test_bitfield(BitField<Flags> flags) {

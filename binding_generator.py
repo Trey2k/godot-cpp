@@ -121,8 +121,10 @@ def get_file_list(api_filepath, output_dir, headers=False, sources=False):
             include_gen_folder / "variant" / "builtin_binds.hpp",
             include_gen_folder / "variant" / "utility_functions.hpp",
             include_gen_folder / "variant" / "variant_size.hpp",
+            include_gen_folder / "variant" / "builtin_vararg_methods.hpp",
             include_gen_folder / "classes" / "global_constants.hpp",
             include_gen_folder / "classes" / "global_constants_binds.hpp",
+            include_gen_folder / "core" / "version.hpp",
         ]:
             files.append(str(path.as_posix()))
     if sources:
@@ -173,6 +175,7 @@ def generate_bindings(api_filepath, use_template_get_node, bits="64", precision=
     print("Built-in type config: " + real_t + "_" + bits)
 
     generate_global_constants(api, target_dir)
+    generate_version_header(api, target_dir)
     generate_global_constant_binds(api, target_dir)
     generate_builtin_bindings(api, target_dir, real_t + "_" + bits)
     generate_engine_classes_bindings(api, target_dir, use_template_get_node)
@@ -344,6 +347,40 @@ def generate_builtin_bindings(api, output_dir, build_config):
 
         builtin_binds_file.write("\n".join(builtin_binds))
 
+    # Create a header to implement all builtin class vararg methods and be included in "variant.hpp".
+    builtin_vararg_methods_header = include_gen_folder / "builtin_vararg_methods.hpp"
+    builtin_vararg_methods_header.open("w+").write(
+        generate_builtin_class_vararg_method_implements_header(api["builtin_classes"])
+    )
+
+
+def generate_builtin_class_vararg_method_implements_header(builtin_classes):
+    result = []
+
+    add_header("builtin_vararg_methods.hpp", result)
+
+    header_guard = "GODOT_CPP_BUILTIN_VARARG_METHODS_HPP"
+    result.append(f"#ifndef {header_guard}")
+    result.append(f"#define {header_guard}")
+    result.append("")
+    for builtin_api in builtin_classes:
+        if not "methods" in builtin_api:
+            continue
+        class_name = builtin_api["name"]
+        for method in builtin_api["methods"]:
+            if not method["is_vararg"]:
+                continue
+
+            result += make_varargs_template(
+                method, "is_static" in method and method["is_static"], class_name, False, False, True
+            )
+            result.append("")
+
+    result.append("")
+    result.append(f"#endif // ! {header_guard}")
+
+    return "\n".join(result)
+
 
 def generate_builtin_class_header(builtin_api, size, used_classes, fully_used_classes):
     result = []
@@ -366,6 +403,7 @@ def generate_builtin_class_header(builtin_api, size, used_classes, fully_used_cl
     if class_name == "String":
         result.append("#include <godot_cpp/variant/char_string.hpp>")
         result.append("#include <godot_cpp/variant/char_utils.hpp>")
+        result.append("#include <godot_cpp/classes/global_constants.hpp>")
 
     if class_name == "PackedStringArray":
         result.append("#include <godot_cpp/variant/string.hpp>")
@@ -552,6 +590,7 @@ def generate_builtin_class_header(builtin_api, size, used_classes, fully_used_cl
         result.append("\tChar32String utf32() const;")
         result.append("\tCharWideString wide_string() const;")
         result.append("\tstatic String num_real(double p_num, bool p_trailing = true);")
+        result.append("\tError resize(int p_size);")
 
     if "members" in builtin_api:
         for member in builtin_api["members"]:
@@ -1140,6 +1179,12 @@ def generate_engine_classes_bindings(api, output_dir, use_template_get_node):
         else:
             fully_used_classes.add("Wrapped")
 
+        # In order to ensure that PtrToArg specializations for native structs are
+        # always used, let's move any of them into 'fully_used_classes'.
+        for type_name in used_classes:
+            if is_struct_type(type_name) and not is_included_struct_type(type_name):
+                fully_used_classes.add(type_name)
+
         for type_name in fully_used_classes:
             if type_name in used_classes:
                 used_classes.remove(type_name)
@@ -1453,16 +1498,22 @@ def generate_engine_class_source(class_api, used_classes, fully_used_classes, us
 
     if is_singleton:
         result.append(f"{class_name} *{class_name}::get_singleton() {{")
-        result.append(f"\tconst StringName _gde_class_name = {class_name}::get_class_static();")
+        # We assume multi-threaded access is OK because each assignment will assign the same value every time
+        result.append(f"\tstatic {class_name} *singleton = nullptr;")
+        result.append("\tif (unlikely(singleton == nullptr)) {")
         result.append(
-            "\tstatic GDExtensionObjectPtr singleton_obj = internal::gdextension_interface_global_get_singleton(_gde_class_name._native_ptr());"
+            f"\t\tGDExtensionObjectPtr singleton_obj = internal::gdextension_interface_global_get_singleton({class_name}::get_class_static()._native_ptr());"
         )
         result.append("#ifdef DEBUG_ENABLED")
-        result.append("\tERR_FAIL_COND_V(singleton_obj == nullptr, nullptr);")
+        result.append("\t\tERR_FAIL_COND_V(singleton_obj == nullptr, nullptr);")
         result.append("#endif // DEBUG_ENABLED")
         result.append(
-            f"\tstatic {class_name} *singleton = reinterpret_cast<{class_name} *>(internal::gdextension_interface_object_get_instance_binding(singleton_obj, internal::token, &{class_name}::_gde_binding_callbacks));"
+            f"\t\tsingleton = reinterpret_cast<{class_name} *>(internal::gdextension_interface_object_get_instance_binding(singleton_obj, internal::token, &{class_name}::_gde_binding_callbacks));"
         )
+        result.append("#ifdef DEBUG_ENABLED")
+        result.append("\t\tERR_FAIL_COND_V(singleton == nullptr, nullptr);")
+        result.append("#endif // DEBUG_ENABLED")
+        result.append("\t}")
         result.append("\treturn singleton;")
         result.append("}")
         result.append("")
@@ -1480,10 +1531,8 @@ def generate_engine_class_source(class_api, used_classes, fully_used_classes, us
             result.append(method_signature + " {")
 
             # Method body.
-            result.append(f"\tconst StringName _gde_class_name = {class_name}::get_class_static();")
-            result.append(f'\tconst StringName _gde_method_name = "{method["name"]}";')
             result.append(
-                f'\tstatic GDExtensionMethodBindPtr _gde_method_bind = internal::gdextension_interface_classdb_get_method_bind(_gde_class_name._native_ptr(), _gde_method_name._native_ptr(), {method["hash"]});'
+                f'\tstatic GDExtensionMethodBindPtr _gde_method_bind = internal::gdextension_interface_classdb_get_method_bind({class_name}::get_class_static()._native_ptr(), StringName("{method["name"]}")._native_ptr(), {method["hash"]});'
             )
             method_call = "\t"
             has_return = "return_value" in method and method["return_value"]["type"] != "void"
@@ -1662,6 +1711,35 @@ def generate_global_constants(api, output_dir):
         header_file.write("\n".join(header))
 
 
+def generate_version_header(api, output_dir):
+    header = []
+    header_filename = "version.hpp"
+    add_header(header_filename, header)
+
+    include_gen_folder = Path(output_dir) / "include" / "godot_cpp" / "core"
+    include_gen_folder.mkdir(parents=True, exist_ok=True)
+
+    header_file_path = include_gen_folder / header_filename
+
+    header_guard = "GODOT_CPP_VERSION_HPP"
+    header.append(f"#ifndef {header_guard}")
+    header.append(f"#define {header_guard}")
+    header.append("")
+
+    header.append(f"#define GODOT_VERSION_MAJOR {api['header']['version_major']}")
+    header.append(f"#define GODOT_VERSION_MINOR {api['header']['version_minor']}")
+    header.append(f"#define GODOT_VERSION_PATCH {api['header']['version_patch']}")
+    header.append(f"#define GODOT_VERSION_STATUS \"{api['header']['version_status']}\"")
+    header.append(f"#define GODOT_VERSION_BUILD \"{api['header']['version_build']}\"")
+
+    header.append("")
+    header.append(f"#endif // {header_guard}")
+    header.append("")
+
+    with header_file_path.open("w+", encoding="utf-8") as header_file:
+        header_file.write("\n".join(header))
+
+
 def generate_global_constant_binds(api, output_dir):
     include_gen_folder = Path(output_dir) / "include" / "godot_cpp" / "classes"
     source_gen_folder = Path(output_dir) / "src" / "classes"
@@ -1773,9 +1851,8 @@ def generate_utility_functions(api, output_dir):
 
         # Function body.
 
-        source.append(f'\tconst StringName _gde_function_name = "{function["name"]}";')
         source.append(
-            f'\tstatic GDExtensionPtrUtilityFunction _gde_function = internal::gdextension_interface_variant_get_ptr_utility_function(_gde_function_name._native_ptr(), {function["hash"]});'
+            f'\tstatic GDExtensionPtrUtilityFunction _gde_function = internal::gdextension_interface_variant_get_ptr_utility_function(StringName("{function["name"]}")._native_ptr(), {function["hash"]});'
         )
         has_return = "return_type" in function and function["return_type"] != "void"
         if has_return:
@@ -1969,10 +2046,22 @@ def make_signature(
     return function_signature
 
 
-def make_varargs_template(function_data, static=False):
+def make_varargs_template(
+    function_data,
+    static=False,
+    class_befor_signature="",
+    with_public_declare=True,
+    with_indent=True,
+    for_builtin_classes=False,
+):
     result = []
 
-    function_signature = "\tpublic: template<class... Args> "
+    function_signature = ""
+
+    if with_public_declare:
+        function_signature = "public: "
+
+    function_signature += "template<class... Args> "
 
     if static:
         function_signature += "static "
@@ -1993,6 +2082,8 @@ def make_varargs_template(function_data, static=False):
     if not function_signature.endswith("*"):
         function_signature += " "
 
+    if len(class_befor_signature) > 0:
+        function_signature += class_befor_signature + "::"
     function_signature += f'{escape_identifier(function_data["name"])}'
 
     method_arguments = []
@@ -2013,7 +2104,7 @@ def make_varargs_template(function_data, static=False):
     function_signature += " {"
     result.append(function_signature)
 
-    args_array = f"\t\tstd::array<Variant, {len(method_arguments)} + sizeof...(Args)> variant_args {{ "
+    args_array = f"\tstd::array<Variant, {len(method_arguments)} + sizeof...(Args)> variant_args {{ "
     for argument in method_arguments:
         if argument["type"] == "Variant":
             args_array += argument["name"]
@@ -2023,19 +2114,42 @@ def make_varargs_template(function_data, static=False):
 
     args_array += "Variant(args)... };"
     result.append(args_array)
-    result.append(f"\t\tstd::array<const Variant *, {len(method_arguments)} + sizeof...(Args)> call_args;")
-    result.append("\t\tfor(size_t i = 0; i < variant_args.size(); i++) {")
-    result.append("\t\t\tcall_args[i] = &variant_args[i];")
-    result.append("\t\t}")
-
-    call_line = "\t\t"
-
-    if return_type != "void":
-        call_line += "return "
-
-    call_line += f'{escape_identifier(function_data["name"])}_internal(call_args.data(), variant_args.size());'
-    result.append(call_line)
+    result.append(f"\tstd::array<const Variant *, {len(method_arguments)} + sizeof...(Args)> call_args;")
+    result.append("\tfor(size_t i = 0; i < variant_args.size(); i++) {")
+    result.append("\t\tcall_args[i] = &variant_args[i];")
     result.append("\t}")
+
+    call_line = "\t"
+
+    if not for_builtin_classes:
+        if return_type != "void":
+            call_line += "return "
+
+        call_line += f'{escape_identifier(function_data["name"])}_internal(call_args.data(), variant_args.size());'
+        result.append(call_line)
+    else:
+        base = "(GDExtensionTypePtr)&opaque"
+        if static:
+            base = "nullptr"
+
+        ret = "nullptr"
+        if return_type != "void":
+            ret = "&ret"
+            result.append(f'\t{correct_type(function_data["return_type"])} ret;')
+
+        function_name = function_data["name"]
+        result.append(
+            f"\t_method_bindings.method_{function_name}({base}, reinterpret_cast<GDExtensionConstTypePtr *>(call_args.data()), {ret}, {len(method_arguments)} + sizeof...(Args));"
+        )
+
+        if return_type != "void":
+            result.append("\treturn ret;")
+
+    result.append("}")
+
+    if with_indent:
+        for i in range(len(result)):
+            result[i] = "\t" + result[i]
 
     return result
 
